@@ -2,16 +2,24 @@
 migrate.py — Migrate OpenClaw workspace markdown files into Qdrant via mem0ai.
 
 Usage:
-    python migrate.py                  # migrate all files
+    python migrate.py                  # migrate all files via mem0
     python migrate.py --dry-run        # preview what would be migrated
     python migrate.py --file MEMORY.md # migrate a single file
     python migrate.py --file memory/   # migrate all daily logs
+    python migrate.py --raw            # bypass mem0, embed + store directly
+    python migrate.py --raw --file X   # raw mode for a single file
+    python migrate.py --raw --dry-run  # preview chunks without storing
+
+Raw mode (--raw):
+    Skips mem0 entirely. Reads markdown files, chunks by ## headers, calls
+    Ollama (bge-m3) for embeddings, and stores vectors + text directly in
+    Qdrant via REST API. No LLM required — only Ollama and Qdrant.
 
 Requires:
     pip install -r requirements.txt
     Qdrant running on localhost:6333
-    Ollama running on localhost:11434 with nomic-embed-text
-    OPENROUTER_API_KEY env var (or key in ~/.openclaw/openclaw.json)
+    Ollama running on localhost:11434 with bge-m3
+    OPENROUTER_API_KEY env var (or key in ~/.openclaw/openclaw.json) — not needed for --raw
 """
 
 import argparse
@@ -20,9 +28,11 @@ import os
 import re
 import sys
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
-from mem0 import Memory
+import requests
 
 WORKSPACE = Path.home() / ".openclaw" / "workspace"
 USER_ID = "pranav"
@@ -76,8 +86,9 @@ def get_openrouter_api_key() -> str:
     sys.exit(1)
 
 
-def init_memory(api_key: str) -> Memory:
+def init_memory(api_key: str):
     """Initialize mem0 Memory with Qdrant + Ollama + OpenRouter."""
+    from mem0 import Memory
     config = {
         "vector_store": {
             "provider": "qdrant",
@@ -85,13 +96,13 @@ def init_memory(api_key: str) -> Memory:
                 "host": "localhost",
                 "port": 6333,
                 "collection_name": "memories",
-                "embedding_model_dims": 768,
+                "embedding_model_dims": 1024,
             },
         },
         "embedder": {
             "provider": "ollama",
             "config": {
-                "model": "nomic-embed-text",
+                "model": "bge-m3",
                 "ollama_base_url": "http://localhost:11434",
             },
         },
@@ -170,7 +181,145 @@ def collect_files(single_file: str | None) -> list[Path]:
     return files
 
 
+QDRANT_URL = "http://localhost:6333"
+OLLAMA_URL = "http://localhost:11434"
+COLLECTION = "memories"
+EMBEDDING_DIM = 1024
+
+
+def ensure_collection():
+    """Create the memories collection in Qdrant if it doesn't exist."""
+    resp = requests.get(f"{QDRANT_URL}/collections/{COLLECTION}", timeout=5)
+    if resp.status_code == 200:
+        return
+    body = {
+        "vectors": {
+            "size": EMBEDDING_DIM,
+            "distance": "Cosine",
+        }
+    }
+    resp = requests.put(
+        f"{QDRANT_URL}/collections/{COLLECTION}",
+        json=body,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    print(f"Created collection '{COLLECTION}' (dim={EMBEDDING_DIM}, Cosine)")
+
+
+def get_embedding(text: str) -> list[float]:
+    """Get bge-m3 embedding from Ollama."""
+    resp = requests.post(
+        f"{OLLAMA_URL}/api/embed",
+        json={"model": "bge-m3", "input": text},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data["embeddings"][0]
+
+
+def store_point(vector: list[float], text: str, source: str):
+    """Store a single point in Qdrant."""
+    point_id = str(uuid.uuid4())
+    body = {
+        "points": [
+            {
+                "id": point_id,
+                "vector": vector,
+                "payload": {
+                    "data": text,
+                    "userId": USER_ID,
+                    "createdAt": datetime.now(timezone.utc).isoformat(),
+                    "source": source,
+                    "type": "raw-chunk",
+                },
+            }
+        ]
+    }
+    resp = requests.put(
+        f"{QDRANT_URL}/collections/{COLLECTION}/points",
+        json=body,
+        timeout=10,
+    )
+    resp.raise_for_status()
+
+
+def migrate_raw(args):
+    """Raw migration: embed with Ollama, store directly in Qdrant."""
+    if args.dry_run:
+        print("DRY RUN (raw mode) — no data will be stored\n")
+    else:
+        print("Raw mode: bypassing mem0, using Ollama + Qdrant directly")
+        ensure_collection()
+
+    files = collect_files(args.file)
+    if not files:
+        print("No files found to migrate.")
+        return
+
+    print(f"Found {len(files)} file(s) to migrate\n")
+
+    total_chunks = 0
+    total_errors = 0
+    files_processed = 0
+
+    for filepath in files:
+        rel = filepath.relative_to(WORKSPACE)
+        print(f"{'─' * 60}")
+        print(f"Processing: {rel}")
+
+        try:
+            content = filepath.read_text(encoding="utf-8")
+        except Exception as e:
+            print(f"  ERROR reading file: {e}")
+            total_errors += 1
+            continue
+
+        if not content.strip():
+            print("  Skipped (empty file)")
+            continue
+
+        chunks = split_into_chunks(content)
+        print(f"  Split into {len(chunks)} chunk(s)")
+
+        file_chunks = 0
+        for i, chunk in enumerate(chunks, 1):
+            preview = chunk[:80].replace("\n", " ")
+            print(f"  Storing raw chunk {i}/{len(chunks)} from {rel}...")
+            print(f"    {preview}")
+
+            if args.dry_run:
+                file_chunks += 1
+                continue
+
+            try:
+                vector = get_embedding(chunk)
+                store_point(vector, chunk, str(rel))
+                file_chunks += 1
+            except Exception as e:
+                print(f"    ERROR: {e}")
+                total_errors += 1
+
+        total_chunks += file_chunks
+        files_processed += 1
+        print(f"  → {file_chunks} chunks from {rel}")
+
+    print(f"\n{'═' * 60}")
+    print("RAW MIGRATION SUMMARY")
+    print(f"{'═' * 60}")
+    print(f"  Files processed: {files_processed}/{len(files)}")
+    print(f"  Chunks stored:   {total_chunks}")
+    print(f"  Errors:          {total_errors}")
+    if args.dry_run:
+        print("  (dry run — nothing was stored)")
+
+
 def migrate(args):
+    if args.raw:
+        migrate_raw(args)
+        return
+
     api_key = get_openrouter_api_key()
 
     if not args.dry_run:
@@ -225,7 +374,6 @@ def migrate(args):
                     user_id=USER_ID,
                     metadata={"source": str(rel), "type": "migration"},
                 )
-                # mem0 returns a dict with 'results' containing extracted memories
                 added = len(result.get("results", []))
                 file_memories += added
                 if added:
@@ -233,7 +381,6 @@ def migrate(args):
                         event = r.get("event", "unknown")
                         mem_text = r.get("memory", "")[:100]
                         print(f"       → {event}: {mem_text}")
-                # Small delay to avoid overwhelming the LLM API
                 time.sleep(0.5)
             except Exception as e:
                 print(f"       ERROR: {e}")
@@ -243,7 +390,6 @@ def migrate(args):
         files_processed += 1
         print(f"  → {file_memories} memories from {rel}")
 
-    # Summary
     print(f"\n{'═' * 60}")
     print("MIGRATION SUMMARY")
     print(f"{'═' * 60}")
@@ -268,6 +414,11 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Migrate a single file (relative to workspace), e.g. MEMORY.md or memory/",
+    )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Bypass mem0: embed with Ollama (bge-m3) and store directly in Qdrant",
     )
     args = parser.parse_args()
     migrate(args)

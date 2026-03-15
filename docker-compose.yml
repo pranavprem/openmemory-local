@@ -1,0 +1,35 @@
+services:
+  qdrant:
+    image: qdrant/qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  openmemory-api:
+    image: mem0/openmemory-mcp
+    ports:
+      - "8765:8765"
+    depends_on:
+      - qdrant
+    environment:
+      - USER=${USER}
+      - API_KEY=${API_KEY}
+    volumes:
+      - ./default_config.json:/app/default_config.json
+    restart: unless-stopped
+
+  openmemory-ui:
+    image: mem0/openmemory-ui:latest
+    ports:
+      - "3000:3000"
+    depends_on:
+      - openmemory-api
+    environment:
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+      - NEXT_PUBLIC_USER_ID=${USER}
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:

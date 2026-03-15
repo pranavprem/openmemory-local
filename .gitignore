@@ -1,0 +1,4 @@
+.env
+qdrant_data/
+node_modules/
+__pycache__/

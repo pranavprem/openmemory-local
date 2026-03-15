@@ -126,6 +126,22 @@ openclaw gateway restart
 # memory_list
 ```
 
+## Dashboard
+
+A single HTML file that talks directly to Qdrant + Ollama. No server needed.
+
+```bash
+open dashboard.html
+```
+
+Features:
+- Dark mode UI
+- Shows total memory count + Qdrant health
+- Lists all stored memories with user, date, metadata
+- **Semantic search** — embeds your query via Ollama, searches by vector similarity
+- Delete individual memories
+- Zero dependencies — just a browser
+
 ## Known Issues & Upstream Bugs
 
 The OpenMemory Docker dashboard (API + UI) **does not work** with Ollama/local setups due to several upstream bugs:

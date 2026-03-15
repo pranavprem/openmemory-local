@@ -67,7 +67,7 @@
 
   <script>
     const QDRANT_URL = 'http://localhost:6333';
-    const COLLECTION = 'openmemory';
+    const COLLECTION = 'memories';
     const OLLAMA_URL = 'http://localhost:11434';
     const EMBED_MODEL = 'nomic-embed-text';
 
@@ -102,11 +102,12 @@
           renderMemories(data.result.points.map(p => ({
             id: p.id,
             text: p.payload?.data || p.payload?.memory || p.payload?.text || JSON.stringify(p.payload),
-            user_id: p.payload?.user_id,
-            created_at: p.payload?.created_at,
-            updated_at: p.payload?.updated_at,
+            user_id: p.payload?.userId || p.payload?.user_id,
+            created_at: p.payload?.createdAt || p.payload?.created_at,
+            updated_at: p.payload?.updatedAt || p.payload?.updated_at,
             category: p.payload?.category,
             hash: p.payload?.hash,
+            runId: p.payload?.runId,
           })));
         } else {
           list.innerHTML = '<div class="empty">No memories found.</div>';
@@ -155,9 +156,9 @@
           renderMemories(searchData.result.points.map(p => ({
             id: p.id,
             text: p.payload?.data || p.payload?.memory || p.payload?.text || JSON.stringify(p.payload),
-            user_id: p.payload?.user_id,
-            created_at: p.payload?.created_at,
-            updated_at: p.payload?.updated_at,
+            user_id: p.payload?.userId || p.payload?.user_id,
+            created_at: p.payload?.createdAt || p.payload?.created_at,
+            updated_at: p.payload?.updatedAt || p.payload?.updated_at,
             category: p.payload?.category,
             score: p.score,
           })));

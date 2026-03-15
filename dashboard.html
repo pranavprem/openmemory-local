@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenMemory Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 2rem; }
+    h1 { color: #58a6ff; margin-bottom: 0.5rem; font-size: 1.8rem; }
+    .subtitle { color: #8b949e; margin-bottom: 2rem; font-size: 0.9rem; }
+    .stats { display: flex; gap: 1.5rem; margin-bottom: 2rem; }
+    .stat { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem 1.5rem; }
+    .stat-value { font-size: 1.8rem; font-weight: 700; color: #58a6ff; }
+    .stat-label { font-size: 0.8rem; color: #8b949e; margin-top: 0.2rem; }
+    .controls { display: flex; gap: 1rem; margin-bottom: 1.5rem; align-items: center; }
+    input[type="text"] { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 0.6rem 1rem; color: #c9d1d9; font-size: 0.95rem; flex: 1; outline: none; }
+    input[type="text"]:focus { border-color: #58a6ff; }
+    button { background: #21262d; border: 1px solid #30363d; border-radius: 6px; padding: 0.6rem 1.2rem; color: #c9d1d9; cursor: pointer; font-size: 0.9rem; }
+    button:hover { background: #30363d; border-color: #58a6ff; }
+    button.danger { border-color: #f85149; color: #f85149; }
+    button.danger:hover { background: #f8514922; }
+    button.primary { background: #238636; border-color: #238636; color: #fff; }
+    button.primary:hover { background: #2ea043; }
+    .memory-list { display: flex; flex-direction: column; gap: 0.75rem; }
+    .memory-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.2rem; transition: border-color 0.2s; }
+    .memory-card:hover { border-color: #58a6ff; }
+    .memory-text { font-size: 1rem; line-height: 1.6; margin-bottom: 0.75rem; }
+    .memory-meta { display: flex; gap: 1rem; font-size: 0.75rem; color: #8b949e; flex-wrap: wrap; align-items: center; }
+    .memory-meta span { background: #21262d; padding: 0.2rem 0.5rem; border-radius: 4px; }
+    .memory-meta .delete-btn { background: none; border: none; color: #f85149; cursor: pointer; font-size: 0.75rem; padding: 0.2rem 0.5rem; border-radius: 4px; }
+    .memory-meta .delete-btn:hover { background: #f8514922; }
+    .empty { text-align: center; padding: 3rem; color: #8b949e; }
+    .error { background: #f8514922; border: 1px solid #f85149; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; color: #f85149; }
+    .loading { text-align: center; padding: 2rem; color: #8b949e; }
+    .tag { display: inline-block; background: #1f6feb33; color: #58a6ff; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; }
+    .search-results-label { color: #8b949e; font-size: 0.85rem; margin-bottom: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>🧠 OpenMemory Dashboard</h1>
+  <p class="subtitle">Local AI Memory — Qdrant + Mem0 + Ollama</p>
+
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-value" id="total-count">—</div>
+      <div class="stat-label">Total Memories</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value" id="collection-status">—</div>
+      <div class="stat-label">Qdrant Status</div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <input type="text" id="search-input" placeholder="Search memories (semantic)..." />
+    <button class="primary" onclick="searchMemories()">Search</button>
+    <button onclick="loadAllMemories()">Show All</button>
+    <button onclick="refreshStats()">↻ Refresh</button>
+  </div>
+
+  <div id="search-label"></div>
+  <div id="error-container"></div>
+  <div id="memory-list" class="memory-list">
+    <div class="loading">Loading memories...</div>
+  </div>
+
+  <script>
+    const QDRANT_URL = 'http://localhost:6333';
+    const COLLECTION = 'openmemory';
+    const OLLAMA_URL = 'http://localhost:11434';
+    const EMBED_MODEL = 'nomic-embed-text';
+
+    async function refreshStats() {
+      try {
+        const res = await fetch(`${QDRANT_URL}/collections/${COLLECTION}`);
+        const data = await res.json();
+        if (data.result) {
+          document.getElementById('total-count').textContent = data.result.points_count || 0;
+          document.getElementById('collection-status').textContent = data.result.status === 'green' ? '✅ OK' : data.result.status;
+        }
+      } catch (e) {
+        document.getElementById('collection-status').textContent = '❌ Error';
+        showError('Cannot reach Qdrant at ' + QDRANT_URL);
+      }
+    }
+
+    async function loadAllMemories() {
+      document.getElementById('search-label').innerHTML = '';
+      document.getElementById('search-input').value = '';
+      const list = document.getElementById('memory-list');
+      list.innerHTML = '<div class="loading">Loading...</div>';
+
+      try {
+        const res = await fetch(`${QDRANT_URL}/collections/${COLLECTION}/points/scroll`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ limit: 100, with_payload: true, with_vector: false })
+        });
+        const data = await res.json();
+        if (data.result && data.result.points) {
+          renderMemories(data.result.points.map(p => ({
+            id: p.id,
+            text: p.payload?.data || p.payload?.memory || p.payload?.text || JSON.stringify(p.payload),
+            user_id: p.payload?.user_id,
+            created_at: p.payload?.created_at,
+            updated_at: p.payload?.updated_at,
+            category: p.payload?.category,
+            hash: p.payload?.hash,
+          })));
+        } else {
+          list.innerHTML = '<div class="empty">No memories found.</div>';
+        }
+      } catch (e) {
+        showError('Failed to load memories: ' + e.message);
+      }
+    }
+
+    async function searchMemories() {
+      const query = document.getElementById('search-input').value.trim();
+      if (!query) return loadAllMemories();
+
+      const list = document.getElementById('memory-list');
+      list.innerHTML = '<div class="loading">Embedding query & searching...</div>';
+      document.getElementById('search-label').innerHTML = `<div class="search-results-label">Search results for: "${query}"</div>`;
+
+      try {
+        // Get embedding from Ollama
+        const embedRes = await fetch(`${OLLAMA_URL}/api/embed`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: EMBED_MODEL, input: query })
+        });
+        const embedData = await embedRes.json();
+        const vector = embedData.embeddings?.[0];
+
+        if (!vector) {
+          showError('Failed to generate embedding from Ollama');
+          return;
+        }
+
+        // Search Qdrant
+        const searchRes = await fetch(`${QDRANT_URL}/collections/${COLLECTION}/points/query`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: vector,
+            limit: 20,
+            with_payload: true,
+          })
+        });
+        const searchData = await searchRes.json();
+
+        if (searchData.result && searchData.result.points) {
+          renderMemories(searchData.result.points.map(p => ({
+            id: p.id,
+            text: p.payload?.data || p.payload?.memory || p.payload?.text || JSON.stringify(p.payload),
+            user_id: p.payload?.user_id,
+            created_at: p.payload?.created_at,
+            updated_at: p.payload?.updated_at,
+            category: p.payload?.category,
+            score: p.score,
+          })));
+        } else {
+          list.innerHTML = '<div class="empty">No results found.</div>';
+        }
+      } catch (e) {
+        showError('Search failed: ' + e.message);
+      }
+    }
+
+    function renderMemories(memories) {
+      const list = document.getElementById('memory-list');
+      if (!memories.length) {
+        list.innerHTML = '<div class="empty">No memories stored yet.</div>';
+        return;
+      }
+
+      list.innerHTML = memories.map(m => `
+        <div class="memory-card" data-id="${m.id}">
+          <div class="memory-text">${escapeHtml(m.text)}</div>
+          <div class="memory-meta">
+            ${m.score != null ? `<span>Score: ${(m.score * 100).toFixed(0)}%</span>` : ''}
+            ${m.user_id ? `<span>👤 ${m.user_id}</span>` : ''}
+            ${m.category ? `<span class="tag">${m.category}</span>` : ''}
+            ${m.created_at ? `<span>📅 ${new Date(m.created_at).toLocaleDateString()}</span>` : ''}
+            <span style="color:#8b949e;font-size:0.7rem">${String(m.id).substring(0, 8)}…</span>
+            <button class="delete-btn" onclick="deleteMemory('${m.id}')">🗑 Delete</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function deleteMemory(id) {
+      if (!confirm('Delete this memory?')) return;
+      try {
+        await fetch(`${QDRANT_URL}/collections/${COLLECTION}/points/delete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ points: [id] })
+        });
+        document.querySelector(`[data-id="${id}"]`)?.remove();
+        refreshStats();
+      } catch (e) {
+        showError('Delete failed: ' + e.message);
+      }
+    }
+
+    function showError(msg) {
+      document.getElementById('error-container').innerHTML = `<div class="error">${escapeHtml(msg)}</div>`;
+      setTimeout(() => document.getElementById('error-container').innerHTML = '', 5000);
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Enter key to search
+    document.getElementById('search-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter') searchMemories();
+    });
+
+    // Init
+    refreshStats();
+    loadAllMemories();
+  </script>
+</body>
+</html>

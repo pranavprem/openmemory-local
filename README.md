@@ -1,46 +1,65 @@
-# OpenMemory Local — Self-Hosted AI Memory with Ollama
+# OpenMemory Local — Self-Hosted AI Memory for OpenClaw
 
-> **Status (2026-03-15):** The OpenMemory Docker dashboard is **blocked** by upstream bugs. We're currently running Mem0 via the OpenClaw plugin directly (Option A below), with Qdrant standalone. See [Known Issues](#known-issues--upstream-bugs) for details.
+> Give your OpenClaw agent persistent, semantic memory using [Mem0](https://github.com/mem0ai/mem0) + [Qdrant](https://qdrant.tech/) + [Ollama](https://ollama.com), running entirely on your own hardware.
 
-## Current Setup (What's Actually Working)
+**Last updated:** 2026-03-18
+
+## What This Does
+
+Your OpenClaw agent wakes up fresh every session. This setup gives it long-term memory:
+
+- **Auto-capture:** After each conversation turn, important facts are automatically extracted and stored
+- **Auto-recall:** Before each turn, relevant memories are retrieved and injected into context
+- **Agent tools:** The agent can explicitly `memory_store`, `memory_search`, `memory_list`, `memory_get`, and `memory_forget`
+- **Semantic search:** Memories are embedded as vectors — the agent finds relevant context even with different wording
+- **100% local:** Embeddings run on Ollama, vectors stored in Qdrant on your machine. Only the extraction LLM can optionally use a cloud API.
+
+## Architecture
 
 ```
-┌──────────────────────────────────────────────┐
-│              OpenClaw Gateway                 │
-│  ┌─────────────────────────────────────────┐  │
-│  │  @mem0/openclaw-mem0 plugin (v0.3.3)    │  │
-│  │  - Auto-recall (before each turn)       │  │
-│  │  - Auto-capture (after each turn)       │  │
-│  │  - 5 agent tools (search/store/forget)  │  │
-│  └────────┬───────────────────┬────────────┘  │
-│           │                   │               │
-│  ┌────────▼────────┐  ┌──────▼──────────┐    │
-│  │  OpenRouter      │  │  Ollama (local) │    │
-│  │  GPT-4o-mini     │  │  nomic-embed-   │    │
-│  │  (extraction)    │  │  text (embed)   │    │
-│  └─────────────────┘  └────────────────┘     │
-└──────────────────────┬───────────────────────┘
+┌──────────────────────────────────────────────────┐
+│                OpenClaw Gateway                   │
+│  ┌─────────────────────────────────────────────┐  │
+│  │  @mem0/openclaw-mem0 plugin (v0.3.3+)       │  │
+│  │  - Auto-recall (before each turn)           │  │
+│  │  - Auto-capture (after each turn)           │  │
+│  │  - 5 agent tools (search/store/get/forget)  │  │
+│  └────────┬───────────────────┬────────────────┘  │
+│           │                   │                   │
+│  ┌────────▼─────────┐  ┌─────▼───────────────┐   │
+│  │  Extraction LLM   │  │  Ollama (local)     │   │
+│  │  GPT-4o-mini via  │  │  bge-m3 embeddings  │   │
+│  │  OpenRouter       │  │  (1024 dims)        │   │
+│  │  (~$0.001/call)   │  │  FREE               │   │
+│  └──────────────────┘  └─────────────────────┘   │
+└──────────────────────┬───────────────────────────┘
                        │
               ┌────────▼────────┐
               │  Qdrant (:6333) │
-              │  (Docker)       │
-              │  v1.14.0        │
+              │  Docker v1.14.0 │
+              │  persistent vol │
               └─────────────────┘
 ```
 
-- **Extraction LLM:** GPT-4o-mini via OpenRouter (~$0.001/extraction)
-- **Embeddings:** Ollama nomic-embed-text (free, local, 768 dims)
-- **Vector store:** Qdrant v1.14.0 (Docker, persistent volume)
-- **QMD** also runs alongside for markdown file search (vsearch mode)
+### Component Roles
+
+| Component | What it does | Where it runs | Cost |
+|-----------|-------------|---------------|------|
+| **Qdrant** | Stores memory vectors + metadata | Docker container, port 6333 | Free |
+| **Ollama + bge-m3** | Generates 1024-dim embeddings for memories | Local, port 11434 | Free |
+| **GPT-4o-mini** | Extracts structured facts from conversation | OpenRouter API | ~$0.001/call |
+| **@mem0/openclaw-mem0** | OpenClaw plugin that wires it all together | Inside OpenClaw process | Free |
+
+> **Why not run extraction locally too?** Small local LLMs (llama3.2, etc.) don't reliably output the structured JSON that Mem0 expects. GPT-4o-mini via OpenRouter costs fractions of a penny per extraction and works perfectly. You can try local extraction, but expect failures.
 
 ## Prerequisites
 
 - **Docker** — for Qdrant
 - **Ollama** installed and running — [ollama.com](https://ollama.com)
-- **OpenRouter API key** — [openrouter.ai](https://openrouter.ai) (for extraction LLM)
-- **OpenClaw** — with the `@mem0/openclaw-mem0` plugin
+- **OpenRouter API key** — [openrouter.ai](https://openrouter.ai) (~$5 credit lasts months)
+- **OpenClaw** — with plugin support
 
-## Quick Start (Current — Plugin Mode)
+## Setup Guide (Step by Step)
 
 ### 1. Start Qdrant
 
@@ -52,11 +71,23 @@ docker run -d --name qdrant \
   qdrant/qdrant:v1.14.0
 ```
 
-### 2. Pull Ollama embedding model
+Verify it's running:
+```bash
+curl -s http://localhost:6333/healthz
+# Should return: {"title":"qdrant - vectorass engine","version":"1.14.0",...}
+```
+
+> **⚠️ Use Qdrant v1.14.x specifically.** The Mem0 JS client (used by the OpenClaw plugin) requires Qdrant ≤1.14. Running `latest` (1.17+) causes version mismatch errors.
+
+### 2. Pull the embedding model
 
 ```bash
-ollama pull nomic-embed-text
+ollama pull bge-m3
 ```
+
+This downloads the BGE-M3 model (~1.2GB). It produces 1024-dimensional embeddings.
+
+> **Alternative:** You can use `nomic-embed-text` (768 dims) instead — just update the `embedding_model_dims` to 768 in the config below. bge-m3 is recommended for better multilingual and retrieval quality.
 
 ### 3. Install the OpenClaw plugin
 
@@ -66,22 +97,22 @@ openclaw plugins install @mem0/openclaw-mem0
 
 ### 4. Configure in `openclaw.json`
 
-Add under `plugins.entries`:
+Add the following under `plugins.entries`:
 
-```json
+```jsonc
 "openclaw-mem0": {
   "enabled": true,
   "config": {
     "mode": "open-source",
-    "userId": "pranav",
-    "autoRecall": true,
-    "autoCapture": true,
-    "topK": 5,
+    "userId": "your-username",      // identifies whose memories these are
+    "autoRecall": true,             // inject relevant memories before each turn
+    "autoCapture": true,            // extract + store memories after each turn
+    "topK": 5,                      // number of memories to recall per turn
     "oss": {
       "embedder": {
         "provider": "ollama",
         "config": {
-          "model": "nomic-embed-text",
+          "model": "bge-m3",
           "ollama_base_url": "http://localhost:11434"
         }
       },
@@ -91,7 +122,7 @@ Add under `plugins.entries`:
           "host": "localhost",
           "port": 6333,
           "collection_name": "openmemory",
-          "embedding_model_dims": 768
+          "embedding_model_dims": 1024
         }
       },
       "llm": {
@@ -109,93 +140,161 @@ Add under `plugins.entries`:
 }
 ```
 
-> **⚠️ Important:** The JS library uses `apiKey` and `baseURL` (camelCase), NOT `api_key` and `openai_base_url` (Python snake_case). The Mem0 docs show Python config — the OpenClaw plugin uses the JS library.
-
 ### 5. Restart the gateway
 
 ```bash
 openclaw gateway restart
 ```
 
-### 6. Verify
+### 6. Verify it works
 
-```bash
-# From chat, ask the agent to run:
-# memory_store "Test memory: the sky is blue"
-# memory_search "sky color"
-# memory_list
+In chat with your agent:
+```
+Store a test memory: "The sky is blue"
+```
+Then:
+```
+Search your memory for sky color
 ```
 
-## Dashboard
+The agent should find it. You can also ask it to run `memory_list` to see all stored memories.
 
-A single HTML file that talks directly to Qdrant + Ollama. No server needed.
+## Migrating Existing Memories
 
-```bash
-open dashboard.html
-```
-
-Features:
-- Dark mode UI
-- Shows total memory count + Qdrant health
-- Lists all stored memories with user, date, metadata
-- **Semantic search** — embeds your query via Ollama, searches by vector similarity
-- Delete individual memories
-- Zero dependencies — just a browser
-
-## Known Issues & Upstream Bugs
-
-The OpenMemory Docker dashboard (API + UI) **does not work** with Ollama/local setups due to several upstream bugs:
-
-### 🔴 Blocking Issues
-
-1. **[#3238](https://github.com/mem0ai/mem0/issues/3238) — No vector_store config route**
-   - The API only exposes PUT routes for `llm` and `embedder`, not `vector_store`
-   - The hardcoded default uses `mem0_store` as the Qdrant hostname
-   - Config PUT silently drops `vector_store` from the payload
-   - Result: `"Failed to initialize memory client: [Errno -2] Name or service not known"`
-
-2. **[#3439](https://github.com/mem0ai/mem0/issues/3439) — OpenMemory local Ollama broken**
-   - `run.sh` calls a `/api/v1/config/mem0/vector_store` route that doesn't exist
-   - `OPENAI_API_KEY` is required even when using Ollama (hardcoded `OpenAI()` client init)
-   - Embedding dimensions default to 1536 (OpenAI) — Ollama models use 768
-   - Community PR with fixes submitted but not merged
-
-3. **[#3447](https://github.com/mem0ai/mem0/issues/3447) — UI missing vector store settings**
-   - No way to configure vector store from the dashboard UI
-
-### 🟡 Workarounds We Used
-
-- Set `OPENAI_API_KEY=sk-unused-ollama-only` to bypass startup crash
-- Renamed Qdrant service to `mem0_store` to match hardcoded default
-- Still failed: memory client couldn't initialize due to embedding dim mismatch
-
-### ✅ What Works Instead
-
-The `@mem0/openclaw-mem0` plugin in open-source mode bypasses all of these issues because it uses the `mem0ai` JS library directly (not the Docker API server). The library properly supports Ollama + Qdrant configuration.
-
-## Future: OpenMemory Dashboard Setup
-
-Once the upstream bugs are fixed, this repo contains Docker Compose files to run the full stack:
+If you already have markdown memory files (like `memory/YYYY-MM-DD.md`, `MEMORY.md`, etc.), the included `migrate.py` script can bulk-import them into Qdrant.
 
 ```bash
 cd ~/git/openmemory-local
-cp .env.example .env
-docker compose up -d
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Run migration (reads all .md files from your workspace)
+python3 migrate.py \
+  --workspace ~/.openclaw/workspace \
+  --qdrant-url http://localhost:6333 \
+  --collection openmemory \
+  --ollama-url http://localhost:11434 \
+  --ollama-model bge-m3 \
+  --openrouter-key YOUR_OPENROUTER_API_KEY \
+  --user-id your-username
 ```
 
-This will start:
-- **Qdrant** (:6333) — vector storage
-- **OpenMemory API** (:8765) — memory management
-- **OpenMemory UI** (:3000) — dashboard for browsing/managing memories
+This will:
+1. Read all `.md` files in your workspace
+2. Chunk them by section headers
+3. Use GPT-4o-mini to extract structured facts from each chunk
+4. Embed with bge-m3 via Ollama
+5. Store in Qdrant
 
-### What to check before re-enabling:
-1. [#3238](https://github.com/mem0ai/mem0/issues/3238) is merged — vector_store config route exists
-2. [#3439](https://github.com/mem0ai/mem0/issues/3439) is merged — Ollama works without OpenAI key
-3. Test with: `docker compose up -d && curl http://localhost:8765/api/v1/config/mem0/vector_store`
-4. If working, switch OpenClaw plugin to Option B (REST plugin pointing at localhost:8765)
+Our migration of ~39 files produced ~300 memories and cost about $0.50 in OpenRouter tokens.
 
-## Lessons Learned
+## Dashboard
 
-- **JS vs Python field names:** The mem0 docs show Python config (`api_key`, `openai_base_url`). The OpenClaw plugin uses the JS library which expects `apiKey` and `baseURL`. This caused hours of debugging.
-- **Ollama extraction quality:** Small local LLMs (llama3.2) don't reliably output the structured JSON format mem0 expects. GPT-4o-mini via OpenRouter is cheap (~$0.001/call) and works perfectly.
-- **Qdrant version compatibility:** The mem0 JS client (v1.13) requires Qdrant ≤1.14. Running Qdrant latest (1.17) causes version mismatch errors.
+`dashboard.html` is a standalone HTML file that talks directly to Qdrant + Ollama. No server needed.
+
+```bash
+open dashboard.html
+# or just open it in any browser
+```
+
+**Features:**
+- Dark mode UI
+- Total memory count + Qdrant health status
+- Browse all stored memories with user, date, and metadata
+- **Semantic search** — embeds your query via Ollama and searches by vector similarity
+- Delete individual memories
+- Zero dependencies — just a browser
+
+## Gotchas & Lessons Learned
+
+### JS vs Python field names (the #1 trap)
+
+The Mem0 docs show Python config everywhere:
+```python
+# Python (DON'T use these in OpenClaw config)
+api_key = "..."
+openai_base_url = "..."
+```
+
+The OpenClaw plugin uses the **JS library**, which expects **camelCase**:
+```json
+// JavaScript (USE these in openclaw.json)
+"apiKey": "...",
+"baseURL": "..."
+```
+
+This mismatch caused hours of debugging. If your memories aren't being stored, check your field names first.
+
+### Qdrant version matters
+
+The `mem0ai` JS client v1.x is built against Qdrant client v1.14. Using Qdrant server v1.17+ causes:
+```
+Error: Version mismatch: expected ≤1.14, got 1.17
+```
+
+Pin to `qdrant/qdrant:v1.14.0`.
+
+### Local LLMs for extraction don't work well
+
+We tried `llama3.2` for memory extraction. It works ~60% of the time — the other 40%, it returns malformed JSON or misses key facts. GPT-4o-mini via OpenRouter is cheap enough (~$0.001/extraction) that it's not worth fighting local models for this.
+
+Embeddings via Ollama work perfectly though — that's the expensive part anyway.
+
+### LaunchAgent + env vars
+
+If OpenClaw runs as a macOS LaunchAgent (daemon), environment variables set in `.zshrc` won't be available. You may need to hardcode the OpenRouter API key directly in `openclaw.json` rather than using env var references. This is a macOS-specific gotcha.
+
+### Collection already exists
+
+If you change embedding models (e.g., nomic-embed-text → bge-m3), you need to delete and recreate the Qdrant collection because dimensions changed:
+
+```bash
+curl -X DELETE http://localhost:6333/collections/openmemory
+# Then restart OpenClaw — the plugin auto-creates the collection
+```
+
+## OpenMemory Docker Dashboard (Blocked)
+
+The official OpenMemory Docker dashboard (API + UI containers) **does not work** with Ollama/local setups due to upstream bugs:
+
+| Issue | Status | Problem |
+|-------|--------|---------|
+| [#3238](https://github.com/mem0ai/mem0/issues/3238) | Open | No `vector_store` config API route — hardcoded to `mem0_store` hostname |
+| [#3439](https://github.com/mem0ai/mem0/issues/3439) | Open | `OPENAI_API_KEY` required even with Ollama; embedding dims hardcoded to 1536 |
+| [#3447](https://github.com/mem0ai/mem0/issues/3447) | Open | UI has no vector store settings page |
+
+The `docker-compose.yml` in this repo is preserved for when these get fixed. Until then, use the standalone `dashboard.html` or the agent's built-in `memory_*` tools.
+
+**To check if upstream is fixed:**
+```bash
+docker compose up -d
+curl http://localhost:8765/api/v1/config/mem0/vector_store
+# If this returns 200 with config, the bugs are fixed
+```
+
+## File Reference
+
+| File | Purpose |
+|------|---------|
+| `README.md` | This file |
+| `dashboard.html` | Standalone memory browser (open in browser) |
+| `migrate.py` | Bulk import markdown files → Qdrant |
+| `requirements.txt` | Python deps for migrate.py |
+| `docker-compose.yml` | Full OpenMemory stack (blocked, saved for later) |
+| `default_config.json` | Config for the Docker stack (not needed for plugin mode) |
+| `.env.example` | Env vars for the Docker stack |
+
+## Alternatives Considered
+
+| Approach | Verdict |
+|----------|---------|
+| OpenMemory Docker (API + UI) | Blocked by upstream bugs — no local Ollama support |
+| Mem0 Cloud (hosted) | Works but sends all memories to mem0.ai servers — defeats the purpose |
+| ChromaDB instead of Qdrant | Mem0 JS client doesn't support Chroma |
+| Weaviate instead of Qdrant | More complex setup, no clear advantage for this use case |
+| Raw pgvector | Would work but need to manage Postgres + lose Mem0's extraction pipeline |
+
+## License
+
+MIT — do whatever you want with it.

@@ -1,4 +1,5 @@
 services:
+  # Local Qdrant (legacy — being migrated to NAS via qdrant-nas repo)
   mem0_store:
     image: qdrant/qdrant
     ports:
@@ -7,6 +8,22 @@ services:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
 
+  # CORS-safe search proxy — runs locally with Ollama, queries Qdrant on NAS
+  search-proxy:
+    build: ./search-proxy
+    container_name: memory-search-proxy
+    ports:
+      - "${SEARCH_PROXY_PORT:-6380}:6380"
+    environment:
+      - QDRANT_URL=${QDRANT_URL:-http://10.0.0.116:6333}
+      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-bge-m3}
+      - PORT=6380
+    restart: unless-stopped
+    profiles:
+      - search
+
+  # OpenMemory services (blocked by upstream bugs — revisit later)
   openmemory-api:
     image: mem0/openmemory-mcp
     ports:
@@ -22,6 +39,8 @@ services:
     volumes:
       - ./default_config.json:/app/default_config.json
     restart: unless-stopped
+    profiles:
+      - openmemory
 
   openmemory-ui:
     image: mem0/openmemory-ui:latest
@@ -33,6 +52,8 @@ services:
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
       - NEXT_PUBLIC_USER_ID=${USER}
     restart: unless-stopped
+    profiles:
+      - openmemory
 
 volumes:
   qdrant_data:

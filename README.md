@@ -2,6 +2,8 @@
 
 > Give your OpenClaw agent persistent, semantic memory using [Mem0](https://github.com/mem0ai/mem0) + [Qdrant](https://qdrant.tech/) + [Ollama](https://ollama.com), running entirely on your own hardware.
 
+> **Running on a Mac mini or low-storage device?** See [qdrant-nas](https://github.com/pranavprem/qdrant-nas) to run Qdrant on a NAS instead of locally.
+
 **Last updated:** 2026-03-18
 
 ## What This Does

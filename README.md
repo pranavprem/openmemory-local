@@ -4,7 +4,7 @@
 
 > **Running on a Mac mini or low-storage device?** See [qdrant-nas](https://github.com/pranavprem/qdrant-nas) to run Qdrant on a NAS instead of locally.
 
-**Last updated:** 2026-03-18
+**Last updated:** 2026-03-20
 
 ## What This Does
 
@@ -208,6 +208,63 @@ open dashboard.html
 - Delete individual memories
 - Zero dependencies — just a browser
 
+## Memory Hygiene: Auto-Capture Generates Junk
+
+**This is the biggest lesson from running Mem0 in production.** The default `customPrompt` and auto-capture settings will flood your Qdrant collection with low-value memories. In our case: **3,412 memories after just 5 weeks**, most of which were useless noise like timestamps, heartbeat statuses, photo observations, and message metadata.
+
+### The Problem
+
+Auto-capture stores **everything the extraction LLM considers a "fact"** — which includes:
+- "The current time is Friday, March 20th, 2026"
+- "HEARTBEAT_OK status was returned"
+- "The sender's ID is 404340348194652160"
+- "The plastic sheeting was sealed with blue tape"
+- Entire blocks from workspace files (TOOLS.md, MEMORY.md) re-stored as memories
+
+These then get auto-recalled in completely wrong contexts (e.g., home renovation details surfacing in a trading strategy discussion), causing the agent to blurt out irrelevant information.
+
+### The Fix: Restrictive customPrompt
+
+Replace the default extraction prompt with one that has an explicit **DO NOT extract** list:
+
+```jsonc
+"customPrompt": "Extract ONLY information that would be useful weeks or months from now. Focus on:\n- User preferences, opinions, and explicit decisions\n- Important relationships between people\n- Project outcomes and status changes (not intermediate steps)\n- Lessons learned from mistakes\n- Configuration details that are hard to re-derive\n- Recurring patterns or schedules\n\nDO NOT extract:\n- Timestamps, current dates, or 'the current time is X'\n- Transient status ('inbox is clean', 'HEARTBEAT_OK', '/tmp is clean')\n- Step-by-step procedure details\n- Message metadata (sender IDs, message IDs, channel names)\n- Observations about photos or images\n- Todo list snapshots or task sync reports\n- Code snippets, file paths, or CLI commands\n- Duplicate information already in workspace files\n- Conversation flow details ('user asked about X')\n- Generic facts from web searches\n\nBe extremely selective. 1-3 high-value memories per conversation is ideal. Zero is fine if nothing worth remembering happened."
+```
+
+### The Fix: Raise searchThreshold
+
+Default `searchThreshold` is 0.5, which pulls in a lot of tangentially related noise. We raised it to **0.6** for better precision:
+
+```jsonc
+"searchThreshold": 0.6
+```
+
+### The Fix: Periodic Cleanup Cron
+
+Even with a better prompt, some junk still gets through. The included `mem0-cleanup.py` script uses regex patterns to find and delete common junk categories:
+
+```bash
+# Dry run first
+python3 mem0-cleanup.py --dry-run
+
+# Actually delete (backs up to memory/mem0-backups/ first)
+python3 mem0-cleanup.py
+
+# Verbose mode to see what's being kept/junked
+python3 mem0-cleanup.py --dry-run -v
+```
+
+We run this on a cron schedule (twice a week). In our first cleanup, it deleted **751 junk memories** out of 3,412 (22% of all stored memories were pure noise).
+
+### Results
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Total memories | 3,412 | 2,661 |
+| Junk entries removed | — | 751 |
+| Cross-context leaks | Frequent | None observed |
+| Memories per conversation | 5-15 (too many) | 1-3 (targeted) |
+
 ## Gotchas & Lessons Learned
 
 ### JS vs Python field names (the #1 trap)
@@ -282,6 +339,7 @@ curl http://localhost:8765/api/v1/config/mem0/vector_store
 | `README.md` | This file |
 | `dashboard.html` | Standalone memory browser (open in browser) |
 | `migrate.py` | Bulk import markdown files → Qdrant |
+| `mem0-cleanup.py` | Periodic junk memory cleanup (cron-friendly, backs up before deleting) |
 | `requirements.txt` | Python deps for migrate.py |
 | `docker-compose.yml` | Full OpenMemory stack (blocked, saved for later) |
 | `default_config.json` | Config for the Docker stack (not needed for plugin mode) |

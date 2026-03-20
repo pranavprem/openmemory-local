@@ -1,38 +1,56 @@
 services:
-  mem0_store:
-    image: qdrant/qdrant
+  qdrant:
+    image: qdrant/qdrant:v1.14.0
+    container_name: qdrant
     ports:
-      - "6333:6333"
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
-      - qdrant_data:/qdrant/storage
+      - ${QDRANT_DATA_DIR:-qdrant_data}:/qdrant/storage
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6333/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
 
+  # --- OpenMemory services (only with: docker compose --profile openmemory up) ---
   openmemory-api:
     image: mem0/openmemory-mcp
+    container_name: openmemory-api
     ports:
-      - "8765:8765"
+      - "${OPENMEMORY_API_PORT:-8765}:8765"
     depends_on:
-      - mem0_store
+      qdrant:
+        condition: service_healthy
     environment:
-      - USER=${USER}
-      - API_KEY=${API_KEY}
+      - USER=${OPENMEMORY_USER:-pranav}
+      - API_KEY=${OPENMEMORY_API_KEY:-openmemory-local}
       - OPENAI_API_KEY=sk-unused-ollama-only
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
     volumes:
       - ./default_config.json:/app/default_config.json
     restart: unless-stopped
+    profiles:
+      - openmemory
 
   openmemory-ui:
     image: mem0/openmemory-ui:latest
+    container_name: openmemory-ui
     ports:
-      - "3000:3000"
+      - "${OPENMEMORY_UI_PORT:-3000}:3000"
     depends_on:
       - openmemory-api
     environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
-      - NEXT_PUBLIC_USER_ID=${USER}
+      - NEXT_PUBLIC_API_URL=http://${NAS_IP:-localhost}:${OPENMEMORY_API_PORT:-8765}
+      - NEXT_PUBLIC_USER_ID=${OPENMEMORY_USER:-pranav}
     restart: unless-stopped
+    profiles:
+      - openmemory
 
 volumes:
   qdrant_data:

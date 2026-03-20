@@ -40,7 +40,8 @@ curl -s -X DELETE "$LOCAL_QDRANT/collections/$COLLECTION/snapshots/$SNAPSHOT_NAM
 SIZE=$(du -sh "$EXPORT_DIR/${COLLECTION}.snapshot" | cut -f1)
 echo ""
 echo "📤 Step 3: Uploading snapshot to NAS ($SIZE)..."
-ssh "$NAS_TARGET" "mkdir -p /tmp/qdrant-export"
+echo "   (If prompted for password, enter your NAS password)"
+ssh "$NAS_TARGET" "mkdir -p /tmp/qdrant-export" || { echo "❌ SSH to NAS failed. Create /tmp/qdrant-export on the NAS manually, then retry."; exit 1; }
 scp "$EXPORT_DIR/${COLLECTION}.snapshot" "$NAS_TARGET:/tmp/qdrant-export/"
 
 echo ""
